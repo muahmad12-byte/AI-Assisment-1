@@ -24,7 +24,12 @@ from pypdf import PdfReader
 # ----------------------------------------------------------------------------
 # Config
 # ----------------------------------------------------------------------------
-DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+# "gemini-flash-latest" is an alias that always points to Google's current Flash model,
+# so the app keeps working when older models are retired.
+DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
+# Tried in order if the chosen model is not found (404 / retired).
+FALLBACK_MODELS = ["gemini-flash-latest", "gemini-3.7-flash", "gemini-3.5-flash",
+                   "gemini-3.1-flash-lite"]
 MAX_FILE_MB = 5
 MAX_RESUME_CHARS = 20000  # keeps the prompt small and fast
 MIN_RESUME_CHARS = 150  # below this the file is probably scanned / empty
@@ -182,15 +187,24 @@ def analyze_resume(client, model: str, resume_text: str, job_description: str = 
     else:
         prompt += "\nJOB DESCRIPTION: (none provided)\n"
 
-    response = client.models.generate_content(
-        model=model,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            temperature=0.2,
-            response_mime_type="application/json",
-        ),
+    config = types.GenerateContentConfig(
+        system_instruction=SYSTEM_PROMPT,
+        response_mime_type="application/json",
     )
+    candidates = [model] + [m for m in FALLBACK_MODELS if m != model]
+    last_exc = None
+    for name in candidates:
+        try:
+            response = client.models.generate_content(model=name, contents=prompt, config=config)
+            break
+        except Exception as exc:
+            low = str(exc).lower()
+            if "404" in low or "not found" in low or "no longer available" in low:
+                last_exc = exc
+                continue  # model retired/unknown -> try the next one
+            raise
+    else:
+        raise last_exc
     return normalize_result(parse_json_response(response.text))
 
 
@@ -202,7 +216,8 @@ def friendly_error(exc: Exception) -> str:
     if "429" in low or "quota" in low or "resource_exhausted" in low:
         return "Gemini rate limit / quota reached. Wait a minute and try again."
     if "404" in low or "not found" in low:
-        return f"Model not found. Try a different model name (current: {DEFAULT_MODEL})."
+        return ("None of the Gemini models were found. Set the model in the sidebar to "
+                "'gemini-flash-latest' or check https://ai.google.dev/gemini-api/docs/models")
     return f"Something went wrong while analyzing: {msg}"
 
 
