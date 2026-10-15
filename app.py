@@ -14,6 +14,7 @@ import io
 import json
 import os
 import re
+import time
 
 import streamlit as st
 from docx import Document
@@ -30,6 +31,8 @@ DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
 # Tried in order if the chosen model is not found (404 / retired).
 FALLBACK_MODELS = ["gemini-flash-latest", "gemini-3.7-flash", "gemini-3.5-flash",
                    "gemini-3.1-flash-lite"]
+RETRIES_PER_MODEL = 3        # attempts per model when Google is overloaded (503/500/504)
+RETRY_BASE_DELAY = 2.0       # seconds; doubles each retry (2s, 4s)
 MAX_FILE_MB = 5
 MAX_RESUME_CHARS = 20000  # keeps the prompt small and fast
 MIN_RESUME_CHARS = 150  # below this the file is probably scanned / empty
@@ -179,6 +182,18 @@ def normalize_result(data: dict) -> dict:
     }
 
 
+def is_not_found(exc: Exception) -> bool:
+    low = str(exc).lower()
+    return "404" in low or "not found" in low or "no longer available" in low
+
+
+def is_transient(exc: Exception) -> bool:
+    """Temporary server-side problems worth retrying."""
+    low = str(exc).lower()
+    return any(t in low for t in ("503", "unavailable", "overloaded", "high demand",
+                                  "500", "internal", "504", "deadline", "timed out"))
+
+
 def analyze_resume(client, model: str, resume_text: str, job_description: str = "") -> dict:
     """Send the resume to Gemini and return a normalized result dict."""
     prompt = f"RESUME:\n\"\"\"\n{resume_text[:MAX_RESUME_CHARS]}\n\"\"\"\n"
@@ -193,17 +208,25 @@ def analyze_resume(client, model: str, resume_text: str, job_description: str = 
     )
     candidates = [model] + [m for m in FALLBACK_MODELS if m != model]
     last_exc = None
+    response = None
     for name in candidates:
-        try:
-            response = client.models.generate_content(model=name, contents=prompt, config=config)
-            break
-        except Exception as exc:
-            low = str(exc).lower()
-            if "404" in low or "not found" in low or "no longer available" in low:
+        for attempt in range(RETRIES_PER_MODEL):
+            try:
+                response = client.models.generate_content(
+                    model=name, contents=prompt, config=config)
+                break
+            except Exception as exc:
                 last_exc = exc
-                continue  # model retired/unknown -> try the next one
-            raise
-    else:
+                if is_not_found(exc):
+                    break  # retired/unknown model -> go to the next one
+                if is_transient(exc):
+                    if attempt < RETRIES_PER_MODEL - 1:
+                        time.sleep(RETRY_BASE_DELAY * (2 ** attempt))
+                    continue  # retry same model, then fall through to next model
+                raise  # key / quota / bad request: retrying won't help
+        if response is not None:
+            break
+    if response is None:
         raise last_exc
     return normalize_result(parse_json_response(response.text))
 
@@ -215,6 +238,9 @@ def friendly_error(exc: Exception) -> str:
         return "Gemini rejected the API key. Please check that it is correct and active."
     if "429" in low or "quota" in low or "resource_exhausted" in low:
         return "Gemini rate limit / quota reached. Wait a minute and try again."
+    if is_transient(exc):
+        return ("Google's Gemini servers are overloaded right now (the app already retried "
+                "several models). Please wait a minute and click Analyze again.")
     if "404" in low or "not found" in low:
         return ("None of the Gemini models were found. Set the model in the sidebar to "
                 "'gemini-flash-latest' or check https://ai.google.dev/gemini-api/docs/models")
