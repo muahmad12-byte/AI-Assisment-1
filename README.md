@@ -1,5 +1,3 @@
-# AI-Assisment-1
-
 # 📄 AI Resume ATS Analyzer
 
 Upload a resume (PDF, DOCX or TXT) and get an **ATS score (0-100)**, a category
@@ -49,7 +47,7 @@ streamlit run app.py
 | Variable | Default | Purpose |
 |---|---|---|
 | `GEMINI_API_KEY` | - | Your Gemini API key |
-| `GEMINI_MODEL` | `gemini-2.5-flash` | Any Gemini Flash model name |
+| `GEMINI_MODEL` | `gemini-flash-latest` | Any Gemini model name (the alias always uses the newest Flash) |
 
 ## Deploy on Streamlit Community Cloud
 1. Push this repo to GitHub (keep `.streamlit/secrets.toml` out of it via `.gitignore`).
